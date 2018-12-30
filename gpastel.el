@@ -4,8 +4,8 @@
 
 ;; Author: Damien Cassou <damien@cassou.me>
 ;; Url: https://gitlab.petton.fr/DamienCassou/desktop-environment
-;; Package-requires: ((emacs "24.4"))
-;; Version: 0.4.0
+;; Package-requires: ((emacs "25.1"))
+;; Version: 0.5.0
 ;; Keywords: tools
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -54,8 +54,14 @@
 
 (defcustom gpastel-gpaste-client-command "gpaste-client"
   "GPaste client name or path."
-  :type 'string
-  :group 'gpastel)
+  :type 'string)
+
+(defcustom gpastel-update-hook nil
+  "Hook which runs after gpastel added an element to `kill-ring'.
+
+Hook functions can retrieve the latest entry by accessing the
+`car' of `kill-ring'."
+  :type 'hook)
 
 (defvar gpastel--dbus-object nil
   "D-Bus object remembering the return value of `dbus-register-signal'.
@@ -105,7 +111,8 @@ all text in the GPaste clipboard."
       ;; system clipboard with `interprogram-cut-function' to be
       ;; saved again to the `kill-ring':
       (unless (string= copied-text (car kill-ring))
-        (kill-new copied-text)))))
+        (kill-new copied-text)
+        (run-hooks 'gpastel-update-hook)))))
 
 (defun gpastel--start-gpaste-daemon ()
   "(Re)Start GPaste daemon and return non-nil upon success."
@@ -121,10 +128,8 @@ all text in the GPaste clipboard."
   "Return GPaste clipboard content at INDEX, or 0."
   (gpastel-dbus-call #'dbus-call-method "GetElement" :uint64 (or index 0)))
 
-;;;###autoload
-(defun gpastel-start-listening ()
+(defun gpastel--start-listening ()
   "Start listening for GPaste events."
-  (interactive)
   (when (gpastel--start-gpaste-daemon)
     ;; No need for `interprogram-paste-function' because GPaste will
     ;; tell us as soon as text is added to clipboard:
@@ -138,9 +143,8 @@ all text in the GPaste clipboard."
     (setq gpastel--dbus-object
           (gpastel-dbus-call #'dbus-register-signal "Update" #'gpastel--update-handler))))
 
-(defun gpastel-stop-listening ()
+(defun gpastel--stop-listening ()
   "Stop listening for GPaste events."
-  (interactive)
   (when (dbus-unregister-object gpastel--dbus-object)
     (setq gpastel--dbus-object nil)
     (setq save-interprogram-paste-before-kill gpastel--save-interprogram-paste-before-kill-orig)
@@ -149,13 +153,32 @@ all text in the GPaste clipboard."
 ;;;###autoload
 (define-minor-mode gpastel-mode
   "Listen to GPaste events."
-  :group 'gpastel
   :global t
   :init-value nil
-  :require 'gpastel
   (if gpastel-mode
-      (gpastel-start-listening)
-    (gpastel-stop-listening)))
+      (gpastel--start-listening)
+    (gpastel--stop-listening)))
+
+(cl-defmethod gui-backend-set-selection (selection-symbol value
+                                                          &context (window-system nil))
+  (if (not (and gpastel-mode (eq selection-symbol 'CLIPBOARD)))
+      (cl-call-next-method)
+    (gpastel-dbus-call #'dbus-call-method "Add" value)))
+
+;; BIG UGLY HACK!
+;; xterm.el has a defmethod to use some (poorly supported) escape
+;; sequences (code named OSC 52) for clipboard interaction, and enables
+;; it by default.
+;; Problem is, that its defmethod takes precedence over our defmethod,
+;; so we need to disable it in order to be called.
+(cl-defmethod gui-backend-set-selection :extra "gpastel-override"
+  (selection-symbol value
+                    &context (window-system nil)
+                    ((terminal-parameter nil 'xterm--set-selection) (eql t)))
+  ;; Disable this method which doesn't work anyway in 99% of the cases!
+  (setf (terminal-parameter nil 'xterm--set-selection) nil)
+  ;; Try again!
+  (gui-backend-set-selection selection-symbol value))
 
 (provide 'gpastel)
 ;;; gpastel.el ends here
